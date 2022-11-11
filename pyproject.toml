@@ -1,0 +1,69 @@
+[tool.poetry]
+name = "base"
+version = "0.1.0"
+description = ""
+authors = ["daikichiba9511 <daikichiba.tech.ml@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.9,<3.10"
+pandas = "^1.4.2"
+numpy = "<1.22"
+matplotlib = "^3.5.1"
+pytorch-lightning = "^1.6.1"
+omegaconf = "^2.2.0"
+loguru = "^0.6.0"
+torchmetrics = "^0.8.1"
+torch = { url = "https://download.pytorch.org/whl/cu116/torch-1.13.0%2Bcu116-cp39-cp39-linux_x86_64.whl"}
+plotly = "^5.11.0"
+seaborn = "^0.12.1"
+pyarrow = "^10.0.0"
+fastparquet = "<0.8.3"
+pickle5 = "*"
+beartype = "^0.11.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^22.3.0"
+isort = "^5.10.1"
+mypy = "^0.942"
+pyproject-flake8 = "^5.0.4.post1"
+autoflake8 = "^0.4.0"
+jupyterlab = "*"
+jupyterlab-lsp = "*"
+jupytext = "*"
+
+
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 120
+target-version = ["py37"]
+
+[tool.isort]
+line_length = 120
+profile = "black"
+
+[tool.flake8]
+max-line-length = 120
+ignore = "E121,E123,E126,E133,E226,E241,E242,E704,W503,W504,W505,E127,E203,E266,E402,W605,W391,E701,E731"
+exclude = [".git", ".venv", "__pycache__", ".mypy_cache"]
+
+[tool.mypy]
+python_version = "3.7"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+allow_redefinition = true
+warn_redundant_casts = true
+show_error_context = true
+incremental = false
+no_implicit_optional = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+disallow_incomplete_defs = true
+warn_no_return = true
+
+[tool.jupytext]
+formats = "notebooks///ipynb,scripts///py:percent"

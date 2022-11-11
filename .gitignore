@@ -1,0 +1,8 @@
+input
+output
+notebooks
+package-lock.json
+node_modules
+__pycache__
+.lsp_symlink
+.ipynb_checkpoints
