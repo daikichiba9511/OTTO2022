@@ -1,3 +1,8 @@
-# Base of Kaggle
+# OTTO – Multi-Objective Recommender System
 
-kaggleのcodeや知見を貯める
+code of otto solution
+
+## Reference
+
+1. [OTTO – Multi-Objective Recommender System](https://www.kaggle.com/competitions/otto-recommender-system/overview)
+
