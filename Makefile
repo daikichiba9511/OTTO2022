@@ -1,6 +1,6 @@
 SHELL=/bin/bash
 # -- setting
-PYTHON ?= python3.7
+PYTHON ?= python3.9
 RUNCMD ?= poetry run
 CUDA ?= cu116
 
@@ -34,7 +34,7 @@ launch_jupyter:
 shutdown_jupyter:
 	kill $(pgrep jupyter)
 
-mysetup:
+mydotfile:
 	git clone git@github.com:daikichiba9511/dotfiles.git ~/dotfiles
 	bash ~/dotfiles/scripts/setup.sh y
 
