@@ -7,8 +7,10 @@ WORKDIR /workspace/working
 
 # nvidia-dockerのGPGキーが更新されたから
 # Ref: https://github.com/NVIDIA/nvidia-docker/issues/1631
-RUN apt-key del 7fa2af80
-RUN apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/machine-learning/repos/ubuntu1804/x86_64/7fa2af80.pub
+RUN apt-key del 7fa2af80 \
+    && apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/machine-learning/repos/ubuntu1804/x86_64/7fa2af80.pub \
+    && useradd -m builder
+
 
 
 RUN apt update && apt upgrade -y \
@@ -23,6 +25,7 @@ RUN apt update && apt upgrade -y \
     wget \
     tzdata \
     locales \
+    sudo \
     tar \
     gcc \
     g++ \
@@ -39,5 +42,7 @@ RUN add-apt-repository ppa:deadsnakes/ppa \
     python-is-python3 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
+
+
 
 COPY ./ ./

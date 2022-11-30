@@ -102,10 +102,9 @@ class PreprocessModule:
     @beartype
     def preprocess(df: pd.DataFrame, fraction_of_sessions_to_use: float) -> pd.DataFrame:
         if fraction_of_sessions_to_use < 0.0 or fraction_of_sessions_to_use > 1.0:
-            raise ValueError(f"invalid range")
+            raise ValueError("invalid range")
         subset_of_df = PreprocessModule._sampled_df_by_session(df=df, sampling_ratio=fraction_of_sessions_to_use)
         subset_of_df.index = pd.MultiIndex.from_frame(subset_of_df[["session"]])
-        assert isinstance(subset_of_df, pd.DataFrame)
         return subset_of_df
 
 
@@ -156,7 +155,7 @@ for i in tqdm(range(0, len(uni_sessions), chunk_size)):
 
 # %%
 
-len(next_aids)
+print(f"{len(next_aids) = }")
 
 # %%
 # %%time

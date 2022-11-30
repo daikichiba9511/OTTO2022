@@ -6,3 +6,8 @@ node_modules
 __pycache__
 .lsp_symlink
 .ipynb_checkpoints
+.devcontainer
+.virtual_documents
+.venv
+.env
+cufile.log

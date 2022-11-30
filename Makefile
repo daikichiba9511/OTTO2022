@@ -14,7 +14,7 @@ poetry:  ## setup poetry
 setup: poetry ## Install dependencies
 	git config --global --add safe.directory /workspace/working/
 	poetry install
-	npm install --save-dev pyright # for jupyterlab-lsp
+	pip install pyright # for jupyterlab-lsp
 
 lint:  ## lint code
 	poetry run black --check -l 120 src scripts

@@ -20,3 +20,5 @@ services:
     volumes:
       - .:/workspace/working
       - ${HOME}/.ssh:/root/.ssh
+      - ${HOME}/.gitconfig:${HOME}/.gitconfig:ro
+      - ${HOME}/.config/git/ignore:${HOME}/.config/git/ignore:ro
