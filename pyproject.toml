@@ -23,6 +23,11 @@ fastparquet = "<0.8.3"
 pickle5 = "*"
 beartype = "^0.11.0"
 pandarallel = "^1.6.3"
+polars = "^0.15.1"
+xgboost = "^1.7.1"
+scikit-learn = "^1.2.0"
+gensim = "^4.3.0"
+annoy = "^1.17.1"
 
 [tool.poetry.group.dev.dependencies]
 black = "^22.3.0"
@@ -47,7 +52,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.black]
 line-length = 120
-target-version = ["py37"]
+target-version = ["py39"]
 
 [tool.isort]
 line_length = 120
@@ -59,7 +64,7 @@ ignore = "E121,E123,E126,E133,E226,E241,E242,E704,W503,W504,W505,E127,E203,E266,
 exclude = [".git", ".venv", "__pycache__", ".mypy_cache"]
 
 [tool.mypy]
-python_version = "3.7"
+python_version = "3.9"
 ignore_missing_imports = true
 disallow_untyped_defs = true
 allow_redefinition = true

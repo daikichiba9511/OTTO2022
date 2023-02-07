@@ -31,12 +31,15 @@ launch_jupyter:
 	if [ !-f ./.lsp_symlink ];then ln -s / .lsp_symlink;fi
 	jupyter lab --ip 0.0.0.0 --port 8892 --allow-root --ContentsManager.allow_hidden=True
 
+setup_jupyter:
+	npm install --save-dev pyright
+
 shutdown_jupyter:
 	kill $(pgrep jupyter)
 
 mydotfile:
-	git clone git@github.com:daikichiba9511/dotfiles.git ~/dotfiles
-	bash ~/dotfiles/scripts/setup.sh y
+	git clone --depth 1 git@github.com:daikichiba9511/dotfiles.git ~/dotfiles
+	bash ~/dotfiles/setup.sh
 
 
 help:  ## Show all of tasks

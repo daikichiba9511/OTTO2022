@@ -6,7 +6,7 @@ services:
       dockerfile: ./Dockerfile
     image: kaggle-local-base-otto
     container_name: kaggle-local-base-container-otto
-    shm_size: 60g
+    shm_size: 120g
     ports:
       - "127.0.0.1:8892:8892"
     tty: true
