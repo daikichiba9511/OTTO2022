@@ -22,7 +22,7 @@ VER = 5
 class CFG:
     exp_name = "exp008_late_sub"
     make_covis_matrix: bool = False
-    debug: bool = True
+    debug: bool = False
     carts2orders_disk_pieces: int = 5
     buys2buys_disk_pieces: int = 1
     clicks2clicks_disk_pieces: int = 4
@@ -914,8 +914,8 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
         top_20_clicks=top_20_clicks,
         top_20_buy2buy=top_20_buy2buy,
         top_20_buys=top_20_buys,
-        clicks_num=20,
-        buys_num=20,
+        clicks_num=30,
+        buys_num=30,
     )
     candidates = make_label(candidates)
 
@@ -939,8 +939,8 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
                 top_20_clicks=top_20_clicks,
                 top_20_buy2buy=top_20_buy2buy,
                 top_20_buys=top_20_buys,
-                clicks_num=20,
-                buys_num=20,
+                clicks_num=30,
+                buys_num=30,
             )
             .rename({"session": "user", "aid": "item"})
             .join(create_user_features(df=valid_df).rename({"session": "user"}), on="user")
@@ -990,8 +990,8 @@ def test() -> None:
         top_20_clicks=top_20_clicks,
         top_20_buy2buy=top_20_buy2buy,
         top_20_buys=top_20_buys,
-        clicks_num=20,
-        buys_num=20,
+        clicks_num=30,
+        buys_num=30,
     )
 
     df_for_item_features = pl.concat([load_all_train_data(), test_df])
