@@ -22,7 +22,7 @@ VER = 5
 class CFG:
     exp_name = "exp008_late_sub"
     make_covis_matrix: bool = False
-    debug: bool = False
+    debug: bool = True
     carts2orders_disk_pieces: int = 5
     buys2buys_disk_pieces: int = 1
     clicks2clicks_disk_pieces: int = 4
@@ -897,7 +897,7 @@ def valid_per_fold(model_per_label: dict[str, xgb.Booster], valid_candidates: pl
     print(f"{metrics_per_type = }")
     scores_path = OUT_DIR / CFG.exp_name / "score.txt"
     metrics_path = OUT_DIR / CFG.exp_name / "metrics.txt"
-    if CFG.debug:
+    if not CFG.debug:
         with scores_path.open("w") as fp:
             fp.write(f"{score}")
         with metrics_path.open("w") as fp:

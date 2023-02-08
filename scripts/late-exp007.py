@@ -897,7 +897,7 @@ def valid_per_fold(model_per_label: dict[str, xgb.Booster], valid_candidates: pl
     print(f"{metrics_per_type = }")
     scores_path = OUT_DIR / CFG.exp_name / "score.txt"
     metrics_path = OUT_DIR / CFG.exp_name / "metrics.txt"
-    if CFG.debug:
+    if not CFG.debug:
         with scores_path.open("w") as fp:
             fp.write(f"{score}")
         with metrics_path.open("w") as fp:
@@ -914,8 +914,8 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
         top_20_clicks=top_20_clicks,
         top_20_buy2buy=top_20_buy2buy,
         top_20_buys=top_20_buys,
-        clicks_num=20,
-        buys_num=20,
+        clicks_num=30,
+        buys_num=30,
     )
     candidates = make_label(candidates)
 
@@ -939,8 +939,8 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
                 top_20_clicks=top_20_clicks,
                 top_20_buy2buy=top_20_buy2buy,
                 top_20_buys=top_20_buys,
-                clicks_num=20,
-                buys_num=20,
+                clicks_num=30,
+                buys_num=30,
             )
             .rename({"session": "user", "aid": "item"})
             .join(create_user_features(df=valid_df).rename({"session": "user"}), on="user")
