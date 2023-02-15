@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import gc
 import itertools
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -20,7 +21,7 @@ VER = 5
 
 
 class CFG:
-    exp_name = "exp008_late_sub"
+    exp_name = "exp008_late_sub_adding_some_features"
     make_covis_matrix: bool = False
     debug: bool = False
     carts2orders_disk_pieces: int = 5
@@ -351,8 +352,11 @@ def create_item_features(df: pl.DataFrame | pd.DataFrame) -> pl.DataFrame:
             pl.col("aid").count().cast(pl.UInt32).alias("item_item_count"),
             pl.col("session").n_unique().cast(pl.UInt32).alias("item_user_count"),
             pl.col("type").mean().cast(pl.Float32).alias("item_buy_ratio"),
-            pl.col("am_activity").mean().cast(pl.Float32).alias("item_am_activity_ratio"),
-            pl.col("pm_activity").mean().cast(pl.Float32).alias("item_pm_activity_ratio"),
+            pl.col("type").std().cast(pl.Float32).alias("item_buy_std_ratio"),
+            pl.col("am_activity").mean().cast(pl.Float32).alias("item_am_activity_mean_ratio"),
+            pl.col("am_activity").std().cast(pl.Float32).alias("item_am_activity_std_ratio"),
+            pl.col("pm_activity").mean().cast(pl.Float32).alias("item_pm_activity_mean_ratio"),
+            pl.col("pm_activity").std().cast(pl.Float32).alias("item_pm_activity_std_ratio"),
         ]
     )
 
@@ -398,19 +402,65 @@ def create_user_features(df: pl.DataFrame | pd.DataFrame) -> pl.DataFrame:
 
     # display(session_sec_df)
 
-    user_features = df.groupby("session").agg(
-        [
-            pl.col("session").count().alias("user_user_count").cast(pl.UInt32),
-            pl.col("aid").n_unique().alias("user_item_count").cast(pl.UInt32),
-            pl.col("type").mean().alias("user_buy_ratio").cast(pl.Float32),
-            pl.col("am_activity").mean().alias("user_am_activity_ratio").cast(pl.Float32),
-            pl.col("pm_activity").mean().alias("user_pm_activity_ratio").cast(pl.Float32),
-        ]
+    user_features = (
+        df.groupby("session")
+        .agg(
+            [
+                pl.col("session").count().alias("user_user_count").cast(pl.UInt32),
+                pl.col("aid").n_unique().alias("user_item_count").cast(pl.UInt32),
+                pl.col("type").mean().alias("user_buy_ratio").cast(pl.Float32),
+                pl.col("am_activity").mean().alias("user_am_activity_ratio").cast(pl.Float32),
+                pl.col("pm_activity").mean().alias("user_pm_activity_ratio").cast(pl.Float32),
+            ]
+        )
+        .with_column(pl.col("session").cast(pl.UInt32))
     )
 
     # user_features = user_features.join(session_sec_df, on="session", how="left")
 
     return user_features
+
+
+def create_features(df: pl.DataFrame) -> pl.DataFrame:
+    pre_columns = df.columns
+
+    # session毎に何個目のアクションかの逆順
+    df = df.with_column(pl.col("user").cumcount().reverse().over("user").alias("action_num_reverse_chrono"))
+
+    # 各sessionのlogの長さ
+    df = df.with_column(pl.col("user").count().over("user").alias("session_length").cast(pl.UInt32))
+
+    # logのrecency score
+    linear_interpolation = 0.1 + ((1 - 0.1) / (df["session_length"] - 1)) * (
+        df["session_length"] - df["action_num_reverse_chrono"] - 1
+    )
+    df = df.with_column((2**linear_interpolation).alias("log_recency_score").cast(pl.Float32).fill_nan(1.0))
+
+    # type毎に重み付けしたlogのrecency score
+    type_weights = {0: 1, 1: 6, 2: 3}
+    type_weighted_log_recency_score = (
+        df["type"].apply(lambda x: type_weights[TYPE_LABELS[x]] if isinstance(x, str) else type_weights[x])
+        * df["log_recency_score"]
+    )
+    df = df.with_column(type_weighted_log_recency_score.alias("type_weighted_log_recency_score").cast(pl.Float32))
+    df = df.select(
+        [
+            *pre_columns,
+            pl.col("log_recency_score"),
+            pl.col("type_weighted_log_recency_score"),
+        ]
+    )
+
+    typed_item_features = df.groupby(["item", "type"]).agg(
+        [
+            pl.col("user").count().cast(pl.UInt32).alias("typed_item_count"),
+            pl.col("item").n_unique().cast(pl.UInt32).alias("typed_item_user_count"),
+        ]
+    )
+
+    df = df.join(typed_item_features, on=["item", "type"], how="left").fill_null(-1.0)
+
+    return df
 
 
 def computed_metric(
@@ -895,13 +945,26 @@ def valid_per_fold(model_per_label: dict[str, xgb.Booster], valid_candidates: pl
     )
     print(f"{score = }")
     print(f"{metrics_per_type = }")
-    scores_path = OUT_DIR / CFG.exp_name / "score.txt"
-    metrics_path = OUT_DIR / CFG.exp_name / "metrics.txt"
+    scores_path = OUT_DIR / CFG.exp_name / "score.json"
+    metrics_path = OUT_DIR / CFG.exp_name / "metrics.json"
     if not CFG.debug:
+        if not scores_path.exists():
+            scores = []
+        else:
+            with scores_path.open("r") as fp:
+                scores = json.load(fp)
+        scores.append(float(score))
         with scores_path.open("w") as fp:
-            fp.write(f"{score}")
+            json.dump(scores, fp)
+
+        if not metrics_path.exists():
+            metrics = []
+        else:
+            with metrics_path.open("r") as fp:
+                metrics = json.load(fp)
+        metrics.append({str(k): float(v) for k, v in metrics_per_type.items()})
         with metrics_path.open("w") as fp:
-            fp.write(f"{metrics_per_type}")
+            json.dump(metrics, fp)
 
 
 def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
@@ -918,6 +981,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
         buys_num=30,
     )
     candidates = make_label(candidates)
+    candidates = create_features(candidates)
 
     do_validation = valid_df is not None
     if do_validation:
@@ -947,12 +1011,20 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
             .join(item_features.rename({"aid": "item"}), on="item")
             .fill_null(-1.0)
         )
+        valid_candidates = create_features(valid_candidates)
     else:
         item_features = create_item_features(df=pl.concat([load_all_train_data(), load_all_test_data()]))
 
     # Reference
     # 1. https://www.kaggle.com/competitions/otto-recommender-system/discussion/379952
-    candidates = candidates.join(item_features.rename({"aid": "item"}), on="item").sort("user")
+    candidates = (
+        candidates.with_columns([pl.col("item").cast(pl.UInt32), pl.col("user").cast(pl.UInt32)])
+        .join(
+            item_features.rename({"aid": "item"}).with_column(pl.col("item").cast(pl.UInt32)),
+            on="item",
+        )
+        .sort("user")
+    )
     gkf = GroupKFold(n_splits=5)
     for fold, (train_idx, valid_idx) in enumerate(gkf.split(X=candidates, groups=candidates["user"]), start=1):
         candidates = candidates.with_column(pl.lit(0).alias(f"fold{fold}").cast(pl.UInt8))
@@ -997,13 +1069,13 @@ def test() -> None:
     df_for_item_features = pl.concat([load_all_train_data(), test_df])
     item_features = create_item_features(df_for_item_features)
     user_features = create_user_features(test_df)
-
     candidates = (
         candidates.join(item_features, on="aid")
         .join(user_features, on="session")
         .fill_null(-1.0)
         .rename({"session": "user", "aid": "item"})
     )
+    candidates = create_features(candidates)
 
     TEST_CHUNKS = 3
 
@@ -1056,7 +1128,7 @@ def main():
     ), f"{set(train_df['session']).intersection(set(valid_df['session'])) = }"
     print(train_df)
     if CFG.debug:
-        debug_user_num = 100
+        debug_user_num = 10
         debug_train_user = train_df["session"].unique()[:debug_user_num]
         debug_valid_user = valid_df["session"].unique()[:debug_user_num]
         train_df = train_df.filter(pl.col("session").is_in(debug_train_user))
