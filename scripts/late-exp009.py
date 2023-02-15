@@ -16,12 +16,13 @@ from sklearn.model_selection import GroupKFold
 from tqdm import tqdm
 
 from src.constants import INPUT_DIR, OUT_DIR, ROOT, TYPE_LABELS
+from src.utils.metrics import AverageMeter
 
 VER = 5
 
 
 class CFG:
-    exp_name = "exp008_late_sub_adding_some_features"
+    exp_name = "exp009_late_sub_adding_w2vec_similarity_features_and_candidates"
     make_covis_matrix: bool = False
     debug: bool = False
     carts2orders_disk_pieces: int = 5
@@ -928,7 +929,13 @@ def predict(candidates: pl.DataFrame, target: str, model: xgb.Booster | None = N
     return predictions
 
 
-def valid_per_fold(model_per_label: dict[str, xgb.Booster], valid_candidates: pl.DataFrame, valid_gt: pl.DataFrame):
+def valid_per_fold(
+    model_per_label: dict[str, xgb.Booster],
+    valid_candidates: pl.DataFrame,
+    valid_gt: pl.DataFrame,
+    avg_metrics_meter: AverageMeter,
+    metrics_per_type_callback: list,
+):
     preds = []
     for label in model_per_label.keys():
         preds.append(
@@ -945,26 +952,9 @@ def valid_per_fold(model_per_label: dict[str, xgb.Booster], valid_candidates: pl
     )
     print(f"{score = }")
     print(f"{metrics_per_type = }")
-    scores_path = OUT_DIR / CFG.exp_name / "score.json"
-    metrics_path = OUT_DIR / CFG.exp_name / "metrics.json"
-    if not CFG.debug:
-        if not scores_path.exists():
-            scores = []
-        else:
-            with scores_path.open("r") as fp:
-                scores = json.load(fp)
-        scores.append(float(score))
-        with scores_path.open("w") as fp:
-            json.dump(scores, fp)
 
-        if not metrics_path.exists():
-            metrics = []
-        else:
-            with metrics_path.open("r") as fp:
-                metrics = json.load(fp)
-        metrics.append({str(k): float(v) for k, v in metrics_per_type.items()})
-        with metrics_path.open("w") as fp:
-            json.dump(metrics, fp)
+    avg_metrics_meter.update(value=score)
+    metrics_per_type_callback.append(metrics_per_type)
 
 
 def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
@@ -1031,6 +1021,8 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
         candidates[valid_idx, f"fold{fold}"] = 1
 
     folds = [column for column in candidates.columns if column.startswith("fold")]
+    avg_metrics_meter = AverageMeter("recall@20")
+    metrics_per_type_callback: list[dict[str, float]] = []
     for fold in folds:
         print("##################\n" + f"## Start {fold}\n" + "##################\n")
         model_per_label = {}
@@ -1041,7 +1033,23 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
                 model.save_model(f"{OUT_DIR}/{CFG.exp_name}/XGB_{fold}_{label}.xgb")
 
         if do_validation:
-            valid_per_fold(model_per_label, valid_candidates, valid_gt)
+            valid_per_fold(
+                model_per_label=model_per_label,
+                valid_candidates=valid_candidates,
+                valid_gt=valid_gt,
+                avg_metrics_meter=avg_metrics_meter,
+                metrics_per_type_callback=metrics_per_type_callback,
+            )
+
+    print(avg_metrics_meter)
+
+    if not CFG.debug:
+        scores_path = OUT_DIR / CFG.exp_name / "score.json"
+        metrics_path = OUT_DIR / CFG.exp_name / "metrics.json"
+        with scores_path.open("w") as fp:
+            json.dump(obj=avg_metrics_meter.to_dict(), fp=fp)
+        with metrics_path.open("w") as fp:
+            json.dump(obj=metrics_per_type_callback, fp=fp)
 
 
 def test() -> None:
