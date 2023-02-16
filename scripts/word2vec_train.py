@@ -68,6 +68,7 @@ def main() -> None:
     for _, idx in aid2idx.items():
         index.add_item(idx, w2vec.wv.vectors[idx])
     index.build(n_trees=10, n_jobs=n_jobs)
+    index.save(fn=f"{OUTPUT_DIR}/w2vec_train/index.ann")
 
     session_type = ["clicks", "carts", "orders"]
     test_session_aids = test_df.to_pandas().reset_index(drop=True).groupby("session")["aid"].apply(list)

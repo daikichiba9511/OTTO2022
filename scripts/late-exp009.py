@@ -8,26 +8,30 @@ from collections import Counter
 from pathlib import Path
 
 import cudf
+import gensim
 import numpy as np
 import pandas as pd
 import polars as pl
 import xgboost as xgb
+from annoy import AnnoyIndex
 from sklearn.model_selection import GroupKFold
 from tqdm import tqdm
 
-from src.constants import INPUT_DIR, OUT_DIR, ROOT, TYPE_LABELS
+from src.constants import INPUT_DIR, OUT_DIR, TYPE_LABELS
 from src.utils.metrics import AverageMeter
 
 VER = 5
 
 
 class CFG:
-    exp_name = "exp009_late_sub_adding_w2vec_similarity_features_and_candidates"
+    exp_name = "exp009_late_sub_adding_w2vec_candidates"
     make_covis_matrix: bool = False
     debug: bool = False
     carts2orders_disk_pieces: int = 5
     buys2buys_disk_pieces: int = 1
     clicks2clicks_disk_pieces: int = 4
+    w2vec_weight: Path = Path(f"{OUT_DIR}/w2vec_train/w2vec")
+    index_ann_weight: Path = Path(f"{OUT_DIR}/w2vec_train/index.ann")
 
 
 # CACHE THE DATA ON CPU BEFORE PROCESSING ON GPU
@@ -619,6 +623,7 @@ def create_candidates(
     top_20_clicks: dict,
     top_20_buy2buy: dict,
     top_20_buys: dict,
+    w2vec_model: gensim.models.Word2Vec,
     clicks_num: int = 20,
     buys_num: int = 20,
 ) -> pl.DataFrame:
@@ -722,6 +727,35 @@ def create_candidates(
     del candidates_clicks, candidates_buys, top_20_clicks, top_20_buys, top_20_buy2buy
     gc.collect()
 
+    def _create_candidates_using_w2vec(w2vec: gensim.models.Word2Vec, df: pl.DataFrame) -> pl.DataFrame:
+        session_aids = df.sort("ts").select(["session", "aid"]).groupby("session").agg_list().to_pandas()
+        index = AnnoyIndex(f=32, metric="euclidean")
+        index.load(str(CFG.index_ann_weight))
+        aid2idx = {aid: i for i, aid in enumerate(w2vec.wv.index_to_key)}
+        labels = []
+        for aids in session_aids["aid"].to_list():
+            aids = list(dict.fromkeys(aids[::-1]))
+            most_recent_aid = aids[0]
+            nns = [w2vec.wv.index_to_key[i] for i in index.get_nns_by_item(aid2idx[most_recent_aid], 11)[1:]]
+            labels.append(nns)
+
+        candidates = (
+            pl.DataFrame({"session": session_aids.index.to_list(), "aid": pl.Series("aid", labels)})
+            .explode("aid")
+            .with_columns([pl.col("session").cast(pl.UInt32), pl.col("aid").cast(pl.UInt32)])
+        )
+        return candidates
+
+    w2vec_carts_candidates = _create_candidates_using_w2vec(
+        w2vec=w2vec_model, df=df.filter(pl.col("type") == TYPE_LABELS["carts"])
+    ).with_column(pl.lit("carts").alias("type"))
+    w2vec_orders_candidates = _create_candidates_using_w2vec(
+        w2vec=w2vec_model, df=df.filter(pl.col("type") == TYPE_LABELS["orders"])
+    ).with_column(pl.lit("orders").alias("type"))
+    w2vec_clicks_candidates = _create_candidates_using_w2vec(
+        w2vec=w2vec_model, df=df.filter(pl.col("type") == TYPE_LABELS["clicks"])
+    ).with_column(pl.lit("clicks").alias("type"))
+
     candidates = pl.concat(
         (
             clicks_candidates,
@@ -730,6 +764,9 @@ def create_candidates(
             top_clicks_candidates,
             top_orders_candidates,
             top_carts_candidates,
+            w2vec_carts_candidates,
+            w2vec_orders_candidates,
+            w2vec_clicks_candidates,
         )
     )
 
@@ -805,8 +842,17 @@ def train_per_fold(candidates: pl.DataFrame, fold: str, label: str, df: pl.DataF
     train_idx = np.hstack((np.where(train_idx & (candidates[label].to_pandas() == 1))[0], negative_idx))
     train_idx.sort()
 
-    query_train = np.unique(candidates[train_idx, "user"], return_counts=True)[1].astype(np.uint16)
-    query_valid = np.unique(candidates[valid_idx, "user"], return_counts=True)[1].astype(np.uint16)
+    # query_train = np.unique(candidates[train_idx, "user"], return_counts=True)[1].astype(np.uint16)
+    # query_valid = np.unique(candidates[valid_idx, "user"], return_counts=True)[1].astype(np.uint16)
+
+    query_train = (
+        candidates[train_idx, "user"].groupby("user", maintain_order=True).count()["count"].to_numpy().astype("u4")
+    )
+    query_valid = (
+        candidates[valid_idx, "user"].groupby("user", maintain_order=True).count()["count"].to_numpy().astype("u4")
+    )
+    assert query_train.sum() == candidates[train_idx].shape[0]
+    assert query_valid.sum() == candidates[valid_idx].shape[0]
 
     train_user_features = create_user_features(
         df=df.filter(pl.col("session").is_in(candidates[train_idx]["user"].unique().to_list()))
@@ -815,8 +861,8 @@ def train_per_fold(candidates: pl.DataFrame, fold: str, label: str, df: pl.DataF
         df=df.filter(pl.col("session").is_in(candidates[valid_idx]["user"].unique().to_list()))
     ).rename({"session": "user"})
 
-    train_candidates = candidates[train_idx].join(train_user_features, on="user").fill_null(-1)
-    valid_candidates = candidates[valid_idx].join(valid_user_features, on="user").fill_null(-1)
+    train_candidates = candidates[train_idx].join(train_user_features, on="user", how="left").fill_null(-1)
+    valid_candidates = candidates[valid_idx].join(valid_user_features, on="user", how="left").fill_null(-1)
 
     assert not check_same_value_exist(train_candidates, valid_candidates, key="user")
 
@@ -845,8 +891,8 @@ def train_per_fold(candidates: pl.DataFrame, fold: str, label: str, df: pl.DataF
     FEATURES = feature_cols
     print(f"[global] {FEATURES = }")
 
-    print(f"{train_candidates[:, FEATURES] = }")
-    print(f"{valid_candidates[:, FEATURES] = }")
+    print(f"{train_candidates[:, FEATURES].to_pandas()}")
+    print(f"{valid_candidates[:, FEATURES].to_pandas()}")
 
     dtrain = xgb.DMatrix(
         data=train_candidates[:, FEATURES].to_pandas(),
@@ -883,6 +929,10 @@ def train_per_fold(candidates: pl.DataFrame, fold: str, label: str, df: pl.DataF
         verbose_eval=num_boost_round // 5,
     )
     return model
+
+
+def load_w2vec_model(w_path: Path) -> gensim.models.Word2Vec:
+    return gensim.models.Word2Vec.load(str(w_path))
 
 
 def predict(candidates: pl.DataFrame, target: str, model: xgb.Booster | None = None) -> pl.DataFrame:
@@ -935,7 +985,7 @@ def valid_per_fold(
     valid_gt: pl.DataFrame,
     avg_metrics_meter: AverageMeter,
     metrics_per_type_callback: list,
-):
+) -> None:
     preds = []
     for label in model_per_label.keys():
         preds.append(
@@ -957,7 +1007,7 @@ def valid_per_fold(
     metrics_per_type_callback.append(metrics_per_type)
 
 
-def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
+def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None, w2vec_model: gensim.models.Word2Vec) -> None:
     top_20_clicks, top_20_buys, top_20_buy2buy = load_co_visitation_matrices()
     print("Here are size of our 3 co-visitation matrices:")
     print(len(top_20_clicks), len(top_20_buy2buy), len(top_20_buys))
@@ -969,6 +1019,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
         top_20_buys=top_20_buys,
         clicks_num=30,
         buys_num=30,
+        w2vec_model=w2vec_model,
     )
     candidates = make_label(candidates)
     candidates = create_features(candidates)
@@ -995,6 +1046,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
                 top_20_buys=top_20_buys,
                 clicks_num=30,
                 buys_num=30,
+                w2vec_model=w2vec_model,
             )
             .rename({"session": "user", "aid": "item"})
             .join(create_user_features(df=valid_df).rename({"session": "user"}), on="user")
@@ -1052,7 +1104,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None) -> None:
             json.dump(obj=metrics_per_type_callback, fp=fp)
 
 
-def test() -> None:
+def test(w2vec_model: gensim.models.Word2Vec) -> None:
     test_df = load_all_test_data()
     if CFG.debug:
         debug_user_num = 100
@@ -1072,6 +1124,7 @@ def test() -> None:
         top_20_buys=top_20_buys,
         clicks_num=30,
         buys_num=30,
+        w2vec_model=w2vec_model,
     )
 
     df_for_item_features = pl.concat([load_all_train_data(), test_df])
@@ -1115,16 +1168,17 @@ def test() -> None:
     print(f"{final_sub = }")
 
 
-def check_same_value_exist(df_i: pl.DataFrame, df_j: pl.DataFrame, key="session") -> bool:
+def check_same_value_exist(df_i: pl.DataFrame, df_j: pl.DataFrame, key: str = "session") -> bool:
     return len(set(df_i[key]).intersection(set(df_j[key]))) > 0
 
 
-def main():
+def main() -> None:
     if CFG.make_covis_matrix:
         load_data_to_cache()
         make_covis_matrix_carts2orders()
         make_covis_matrix_buy2buy()
         make_covis_matrix_clicks2clicks()
+        del DATA_CACHE
 
     Path(OUT_DIR / CFG.exp_name).mkdir(parents=True, exist_ok=True)
 
@@ -1142,18 +1196,19 @@ def main():
         train_df = train_df.filter(pl.col("session").is_in(debug_train_user))
         valid_df = valid_df.filter(pl.col("session").is_in(debug_valid_user))
     print(f"{train_df.shape = }, {valid_df.shape = }")
-    train(train_df=train_df, valid_df=valid_df)
+    w2vec_model = load_w2vec_model(w_path=CFG.w2vec_weight)
+    train(train_df=train_df, valid_df=valid_df, w2vec_model=w2vec_model)
 
     # ---------------
     # 全データ使って学習
     # ---------------
     print("##################\n" + "## training using all data \n" + "##################\n")
-    train(train_df=pl.concat([train_df, valid_df]), valid_df=None)
+    train(train_df=pl.concat([train_df, valid_df]), valid_df=None, w2vec_model=w2vec_model)
 
     # ---------------
     # submissionを作る
     # ---------------
-    test()
+    test(w2vec_model=w2vec_model)
 
 
 if __name__ == "__main__":
