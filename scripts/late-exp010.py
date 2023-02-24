@@ -24,7 +24,7 @@ VER = 5
 
 
 class CFG:
-    exp_name = "exp010"
+    exp_name = "exp010_adding_similarity_features"
     make_covis_matrix: bool = False
     debug: bool = False
     carts2orders_disk_pieces: int = 5
@@ -426,7 +426,7 @@ def create_user_features(df: pl.DataFrame | pd.DataFrame) -> pl.DataFrame:
     return user_features
 
 
-def create_features(df: pl.DataFrame) -> pl.DataFrame:
+def create_features(df: pl.DataFrame, w2vec: gensim.models.Word2Vec) -> pl.DataFrame:
     pre_columns = df.columns
 
     # session毎に何個目のアクションかの逆順
@@ -463,7 +463,23 @@ def create_features(df: pl.DataFrame) -> pl.DataFrame:
         ]
     )
 
+    def _get_similarity(x):
+        # print(x)
+        try:
+            return w2vec.wv.similarity(str(int(x[0])), str(int(x[1])))
+        except:
+            return -1.0
+
     df = df.join(typed_item_features, on=["item", "type"], how="left").fill_null(-1.0)
+    df = df.with_columns(
+        [
+            pl.Series(
+                "user_item_similarity",
+                df.select(["user", "item"]).apply(_get_similarity).to_numpy().reshape(-1),
+                dtype=pl.Float32,
+            )
+        ]
+    )
 
     return df
 
@@ -1022,7 +1038,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None, w2vec_model: ge
         w2vec_model=w2vec_model,
     )
     candidates = make_label(candidates)
-    candidates = create_features(candidates)
+    candidates = create_features(candidates, w2vec=w2vec_model)
 
     do_validation = valid_df is not None
     if do_validation:
@@ -1053,7 +1069,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None, w2vec_model: ge
             .join(item_features.rename({"aid": "item"}), on="item")
             .fill_null(-1.0)
         )
-        valid_candidates = create_features(valid_candidates)
+        valid_candidates = create_features(valid_candidates, w2vec=w2vec_model)
     else:
         item_features = create_item_features(df=pl.concat([load_all_train_data(), load_all_test_data()]))
 
@@ -1136,7 +1152,7 @@ def test(w2vec_model: gensim.models.Word2Vec) -> None:
         .fill_null(-1.0)
         .rename({"session": "user", "aid": "item"})
     )
-    candidates = create_features(candidates)
+    candidates = create_features(candidates, w2vec=w2vec_model)
 
     TEST_CHUNKS = 3
 
