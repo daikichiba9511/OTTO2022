@@ -4,7 +4,10 @@ import datetime
 import gc
 import itertools
 import json
+import multiprocessing as mp
+import time
 from collections import Counter
+from functools import partial
 from pathlib import Path
 
 import cudf
@@ -24,14 +27,17 @@ VER = 5
 
 
 class CFG:
-    exp_name = "exp010_adding_similarity_features"
+    exp_name = "exp011_adding_some_features"
     make_covis_matrix: bool = False
     debug: bool = False
+    make_submission: bool = True
     carts2orders_disk_pieces: int = 5
     buys2buys_disk_pieces: int = 1
     clicks2clicks_disk_pieces: int = 4
     w2vec_weight: Path = Path(f"{OUT_DIR}/w2vec_train/w2vec")
     index_ann_weight: Path = Path(f"{OUT_DIR}/w2vec_train/index.ann")
+    measurement_process: bool = False
+    using_mp: bool = False
 
 
 # CACHE THE DATA ON CPU BEFORE PROCESSING ON GPU
@@ -334,6 +340,7 @@ def create_item_features(df: pl.DataFrame | pd.DataFrame) -> pl.DataFrame:
         df.lazy()
         .with_column((pl.col("ts").cast(pl.Int64) * 1000).cast(pl.Datetime).dt.with_time_unit("ms").alias("timestamp"))
         .with_column(pl.col("timestamp").cast(pl.Time).alias("time"))
+        .with_column(pl.col("timestamp").cast(pl.Date).alias("date"))
         .with_columns(
             [
                 pl.col("time")
@@ -364,6 +371,55 @@ def create_item_features(df: pl.DataFrame | pd.DataFrame) -> pl.DataFrame:
             pl.col("pm_activity").std().cast(pl.Float32).alias("item_pm_activity_std_ratio"),
         ]
     )
+
+    uni_days = df["date"].unique()
+    uni_days_ln = len(uni_days)
+    w1_start = uni_days[0]
+    w2_start = uni_days[int(1 * (uni_days_ln // 4))]
+    w3_start = uni_days[int(2 * (uni_days_ln // 4))]
+    w4_start = uni_days[int(3 * (uni_days_ln // 4))]
+
+    def _create_item_count_every_week(
+        item_features: pl.DataFrame, df: pl.DataFrame, start: pl.Date, end: pl.Date, week: str
+    ) -> pl.DataFrame:
+        return item_features.join(
+            df.filter(pl.col("date").is_between(start=start, end=end))
+            .groupby(["aid"])
+            .count()
+            .rename({"count": f"last_{week}_type_item_count"}),
+            how="left",
+            on=["aid"],
+        )
+
+    item_features = _create_item_count_every_week(
+        item_features=item_features, df=df, start=w1_start, end=w2_start, week="w1"
+    )
+    item_features = _create_item_count_every_week(
+        item_features=item_features, df=df, start=w2_start, end=w3_start, week="w2"
+    )
+    item_features = _create_item_count_every_week(
+        item_features=item_features, df=df, start=w3_start, end=w4_start, week="w3"
+    )
+    item_features = _create_item_count_every_week(
+        item_features=item_features, df=df, start=w4_start, end=uni_days[-1], week="w4"
+    )
+
+    def _create_item_count_last_7days(
+        item_features: pl.DataFrame, df: pl.DataFrame, date: pl.Date, day: str
+    ) -> pl.DataFrame:
+        return item_features.join(
+            df.filter(pl.col("date") == date).groupby(["aid"]).count().rename({"count": f"last_{day}_type_item_count"}),
+            how="left",
+            on=["aid"],
+        )
+
+    item_features = _create_item_count_last_7days(item_features=item_features, df=df, date=uni_days[-7], day="1d")
+    item_features = _create_item_count_last_7days(item_features=item_features, df=df, date=uni_days[-6], day="2d")
+    item_features = _create_item_count_last_7days(item_features=item_features, df=df, date=uni_days[-5], day="3d")
+    item_features = _create_item_count_last_7days(item_features=item_features, df=df, date=uni_days[-4], day="4d")
+    item_features = _create_item_count_last_7days(item_features=item_features, df=df, date=uni_days[-3], day="5d")
+    item_features = _create_item_count_last_7days(item_features=item_features, df=df, date=uni_days[-2], day="6d")
+    item_features = _create_item_count_last_7days(item_features=item_features, df=df, date=uni_days[-1], day="7d")
 
     return item_features
 
@@ -447,6 +503,24 @@ def create_features(df: pl.DataFrame, w2vec: gensim.models.Word2Vec) -> pl.DataF
         df["type"].apply(lambda x: type_weights[TYPE_LABELS[x]] if isinstance(x, str) else type_weights[x])
         * df["log_recency_score"]
     )
+
+    # type毎のsessionの長さ
+    df = df.join(
+        df.groupby(by=["user", "type"]).count().with_column(pl.col("count").alias("user_type_length")),
+        how="left",
+        on=["user", "type"],
+    ).fill_null(-1.0)
+
+    # type毎の各sessionのuniqueなaidの数
+    df = df.join(
+        df.select(["user", "item", "type"])
+        .groupby(by=["user", "type"])
+        .n_unique()
+        .with_column(pl.col("item").alias("type_item_n_unique")),
+        how="left",
+        on=["user", "type"],
+    ).fill_null(-1.0)
+
     df = df.with_column(type_weighted_log_recency_score.alias("type_weighted_log_recency_score").cast(pl.Float32))
     df = df.select(
         [
@@ -642,6 +716,7 @@ def create_candidates(
     w2vec_model: gensim.models.Word2Vec,
     clicks_num: int = 20,
     buys_num: int = 20,
+    using_mp: bool = False,
 ) -> pl.DataFrame:
 
     top_20_clicks_set = set(top_20_clicks)
@@ -658,39 +733,76 @@ def create_candidates(
     #         num=20
     #     )
     # )
-
-    candidates_clicks = pl.concat(
-        [
-            suggest_clicks(x, top_20_clicks=top_20_clicks, top_20_clicks_set=top_20_clicks_set, num=clicks_num)
-            for x in tqdm(df.groupby("session"), total=df["session"].n_unique())
-        ],
-        how="vertical",
-    )
-
-    # candidates_buys = df.groupby(["session"]).apply(
-    #     lambda x: suggest_buys(
-    #         x,
-    #         top_20_buy2buy=top_20_buy2buy,
-    #         top_20_buys=top_20_buys,
-    #         num=20,
-    #         top_20_buy2buy_set=top_20_buy2buy_set,
-    #         top_20_buys_set=top_20_buys_set
-    #     )
-    # )
-    candidates_buys = pl.concat(
-        [
-            suggest_buys(
-                x,
-                top_20_buy2buy=top_20_buy2buy,
-                top_20_buys=top_20_buys,
-                num=buys_num,
-                top_20_buy2buy_set=top_20_buy2buy_set,
-                top_20_buys_set=top_20_buys_set,
+    if using_mp:
+        with mp.get_context("spawn").Pool(processes=mp.cpu_count()) as p:
+            candidates_clicks = list(
+                tqdm(
+                    p.imap_unordered(
+                        partial(
+                            suggest_clicks,
+                            top_20_clicks=top_20_clicks,
+                            top_20_clicks_set=top_20_clicks_set,
+                            num=clicks_num,
+                        ),
+                        list(df.groupby("session")),
+                    ),
+                    total=df["session"].n_unique(),
+                )
             )
-            for x in tqdm(df.groupby("session"), total=df["session"].n_unique())
-        ],
-        how="vertical",
-    )
+        candidates_clicks = pl.concat(candidates_clicks)
+
+        with mp.get_context("spawn").Pool(processes=mp.cpu_count()) as p:
+            candidates_buys = list(
+                tqdm(
+                    p.imap_unordered(
+                        partial(
+                            suggest_buys,
+                            top_20_buy2buy=top_20_buy2buy,
+                            top_20_buys=top_20_buys,
+                            num=buys_num,
+                            top_20_buy2buy_set=top_20_buy2buy_set,
+                            top_20_buys_set=top_20_buys_set,
+                        ),
+                        list(df.groupby("session")),
+                    ),
+                    total=df["session"].n_unique(),
+                )
+            )
+        candidates_buys = pl.concat(candidates_buys)
+
+    else:
+        candidates_clicks = pl.concat(
+            [
+                suggest_clicks(x, top_20_clicks=top_20_clicks, top_20_clicks_set=top_20_clicks_set, num=clicks_num)
+                for x in tqdm(df.groupby("session"), total=df["session"].n_unique())
+            ],
+            how="vertical",
+        )
+
+        # candidates_buys = df.groupby(["session"]).apply(
+        #     lambda x: suggest_buys(
+        #         x,
+        #         top_20_buy2buy=top_20_buy2buy,
+        #         top_20_buys=top_20_buys,
+        #         num=20,
+        #         top_20_buy2buy_set=top_20_buy2buy_set,
+        #         top_20_buys_set=top_20_buys_set
+        #     )
+        # )
+        candidates_buys = pl.concat(
+            [
+                suggest_buys(
+                    x,
+                    top_20_buy2buy=top_20_buy2buy,
+                    top_20_buys=top_20_buys,
+                    num=buys_num,
+                    top_20_buy2buy_set=top_20_buy2buy_set,
+                    top_20_buys_set=top_20_buys_set,
+                )
+                for x in tqdm(df.groupby("session"), total=df["session"].n_unique())
+            ],
+            how="vertical",
+        )
 
     top_k = 5
     top_clicks_candidates = (
@@ -1028,6 +1140,22 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None, w2vec_model: ge
     print("Here are size of our 3 co-visitation matrices:")
     print(len(top_20_clicks), len(top_20_buy2buy), len(top_20_buys))
 
+    if CFG.measurement_process:
+        print("[WARNING], measurement process is called.")
+        start = time.time()
+        _ = create_candidates(
+            df=train_df.sample(n=5000, seed=42),
+            top_20_clicks=top_20_clicks,
+            top_20_buy2buy=top_20_buy2buy,
+            top_20_buys=top_20_buys,
+            clicks_num=30,
+            buys_num=30,
+            w2vec_model=w2vec_model,
+            using_mp=CFG.using_mp,
+        )
+        print(f"Duration time: {time.time() - start:.4f} [sec]")
+        raise Exception("measurement process is called.")
+
     candidates = create_candidates(
         df=train_df,
         top_20_clicks=top_20_clicks,
@@ -1036,6 +1164,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None, w2vec_model: ge
         clicks_num=30,
         buys_num=30,
         w2vec_model=w2vec_model,
+        using_mp=CFG.using_mp,
     )
     candidates = make_label(candidates)
     candidates = create_features(candidates, w2vec=w2vec_model)
@@ -1063,6 +1192,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None, w2vec_model: ge
                 clicks_num=30,
                 buys_num=30,
                 w2vec_model=w2vec_model,
+                using_mp=CFG.using_mp,
             )
             .rename({"session": "user", "aid": "item"})
             .join(create_user_features(df=valid_df).rename({"session": "user"}), on="user")
@@ -1111,7 +1241,7 @@ def train(train_df: pl.DataFrame, valid_df: pl.DataFrame | None, w2vec_model: ge
 
     print(avg_metrics_meter)
 
-    if not CFG.debug:
+    if not CFG.debug and do_validation:
         scores_path = OUT_DIR / CFG.exp_name / "score.json"
         metrics_path = OUT_DIR / CFG.exp_name / "metrics.json"
         with scores_path.open("w") as fp:
@@ -1141,6 +1271,7 @@ def test(w2vec_model: gensim.models.Word2Vec) -> None:
         clicks_num=30,
         buys_num=30,
         w2vec_model=w2vec_model,
+        using_mp=CFG.using_mp,
     )
 
     df_for_item_features = pl.concat([load_all_train_data(), test_df])
@@ -1215,16 +1346,17 @@ def main() -> None:
     w2vec_model = load_w2vec_model(w_path=CFG.w2vec_weight)
     train(train_df=train_df, valid_df=valid_df, w2vec_model=w2vec_model)
 
-    # ---------------
-    # 全データ使って学習
-    # ---------------
-    print("##################\n" + "## training using all data \n" + "##################\n")
-    train(train_df=pl.concat([train_df, valid_df]), valid_df=None, w2vec_model=w2vec_model)
+    if CFG.make_submission:
+        # ---------------
+        # 全データ使って学習
+        # ---------------
+        print("##################\n" + "## training using all data \n" + "##################\n")
+        train(train_df=pl.concat([train_df, valid_df]), valid_df=None, w2vec_model=w2vec_model)
 
-    # ---------------
-    # submissionを作る
-    # ---------------
-    test(w2vec_model=w2vec_model)
+        # ---------------
+        # submissionを作る
+        # ---------------
+        test(w2vec_model=w2vec_model)
 
 
 if __name__ == "__main__":
